@@ -360,6 +360,22 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
                 });
             });
 
+            // 曲名の比較。Intl.Collator があれば日本語の照合順序を使う。
+            // numeric: true で "Song 2" が "Song 10" より先に来る。
+            //
+            // スプレッドシートの行順には頼らない。Google スプレッドシートの並べ替えは
+            // 漢字をコードポイント順にするので、「恋色…」が「感情の…」より先に来るなど
+            // 一般的な日本語の順序と食い違う。表示側で毎回並べ直す。
+            var collator = (window.Intl && Intl.Collator)
+                ? new Intl.Collator("ja", { numeric: true, sensitivity: "variant" })
+                : null;
+
+            function compareTitle(a, b) {
+                var x = a.title || "", y = b.title || "";
+                if (collator) return collator.compare(x, y);
+                return x < y ? -1 : x > y ? 1 : 0;
+            }
+
             function makeBMSTable(info, mark, order) {
                 var obj = $("#table_int");
                 obj.html("");
@@ -374,7 +390,8 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
                 }
 
                 levels.forEach(function (level) {
-                    var rows = info.filter(function (e) { return e.level === level; });
+                    // filter が新しい配列を返すので、そのまま sort してよい（info は壊さない）
+                    var rows = info.filter(function (e) { return e.level === level; }).sort(compareTitle);
                     if (!rows.length) return;
 
                     $("<tr class='table-dark' style='text-align:center'><td colspan='4'><b>" +
