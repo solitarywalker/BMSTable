@@ -2,103 +2,79 @@
 <html lang="ja">
 
 <head>
-    <title>ここに難易度表の名前</title>
+    <title>BMS 難易度表ブリッジ</title>
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="bmstable" content="header.json" />
-    <script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta1/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-giJF6kkoqNQ00vy+HMDP7azOuL0xtbfIcaT9wjKHr8RbDVddVHyTfAAsrekwKmP1" crossorigin="anonymous">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta1/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-ygbV9kiqUc6oa4msXn9868pTtWMgiQaeYH7/t7LECLbyPA2x65Kgf80OJFdroafW" crossorigin="anonymous">
-    </script>
 </head>
 
 <body>
     <header class="mb-3">
         <nav class="navbar navbar-dark bg-dark">
             <div class="container-fluid">
-                <span class="navbar-brand mb-0 h1">ここに難易度表の名前</span>
+                <span class="navbar-brand mb-0 h1">BMS 難易度表ブリッジ</span>
             </div>
         </nav>
     </header>
 
     <div class="container">
+        <p>公開された Google スプレッドシートを BMS 難易度表として読める形に変換します。
+            データはどこにも保存せず、リクエストのたびにスプレッドシートから取得します。</p>
 
-        <div class="alert alert-success mb-3" role="alert">
-            <p>ここに難易度表の説明文。次期難易度表フォーマット対応。</p>
-            <p>難易度表の読み込みと表示に数秒かかります。</p>
-            <hr>
-            <p class="mb-0">説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文説明文</p>
+        <div class="mb-3">
+            <label class="form-label" for="src">スプレッドシートの URL または ID</label>
+            <input class="form-control" id="src" placeholder="https://docs.google.com/spreadsheets/d/…/edit">
         </div>
 
-
-        <!--ここから難易度表本体-->
-        <div>
-            <table class="table table-light table-striped table-hover" id="table_int">
-            </table>
+        <div class="alert alert-secondary">
+            <p class="mb-1">シート一覧:</p>
+            <p class="mb-0"><code class="user-select-all" id="out">—</code></p>
         </div>
-        <script language="javascript" type="text/javascript">
-            $(document).ready(function () {
-                $.getJSON($("meta[name=bmstable]").attr("content"), function (header) {
-                    $.getJSON(header.data_url, function (information) {
-                        makeBMSTable(information, header.symbol);
-                    });
-                });
-            });
 
-            function makeBMSTable(info, mark) {
-                var x = "";
-                var ev = "";
-                var count = 0;
-                var obj = $("#table_int");
+        <p class="small text-muted">1 つのスプレッドシートに複数の難易度表を置けます。
+            beatoraja に登録する URL は、一覧ページで表を選ぶと表示されます。</p>
 
-                obj.html("");
-                $("<thead class='table-dark'><tr><th>Level</th><th>Title</th><th>Artist</th><th>Comment</th></tr></thead><tbody>")
-                    .appendTo(obj);
-                var obj_sep = null;
-                for (var i = 0; i < info.length; i++) {
-                    if (x != info[i].level) {
-                        if (obj_sep != null) {
-                            obj_sep.html("<td colspan='4'>" + "<b>" + mark + x + " (" + count +
-                                "譜面)</b></td>");
-                        }
-                        obj_sep = $("<tr class='table-dark' style='text-align:center' id='" + mark + info[i].level +
-                            "'></tr>");
-                        obj_sep.appendTo(obj);
-                        count = 0;
-                        x = info[i].level;
+        <p><a class="btn btn-primary disabled" id="open">シート一覧を開く</a></p>
+
+        <h2 class="h5 mt-4">スプレッドシートの条件</h2>
+        <ul>
+            <li>共有設定を「リンクを知っている全員が閲覧可」にする</li>
+            <li><code>md5</code> か <code>sha256</code> の列を持つシートがデータとして読まれる
+                （<code>level</code> と <code>title</code> も必須）</li>
+            <li><code>name</code> / <code>symbol</code> / <code>level_order</code> / <code>description</code> を
+                1 行で持つシートがあれば、それがヘッダとして読まれる</li>
+            <li><code>level</code> に <code>symbol</code> を含めない（<code>★12</code> は <code>★★12</code> になる）</li>
+        </ul>
+        <p class="small text-muted">
+            詳細は <a href="https://github.com/solitarywalker/BMSTable#readme">README</a> を参照してください。
+        </p>
+
+        <script type="text/javascript">
+            (function () {
+                var src = document.getElementById("src");
+                var out = document.getElementById("out");
+                var open = document.getElementById("open");
+
+                src.addEventListener("input", function () {
+                    var v = src.value.trim();
+                    // スプレッドシートの URL でも ID 直打ちでも受ける
+                    var m = v.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]{20,80})/) ||
+                            v.match(/^([A-Za-z0-9_-]{20,80})$/);
+
+                    if (!m) {
+                        out.textContent = "—";
+                        open.removeAttribute("href");
+                        open.classList.add("disabled");
+                        return;
                     }
-
-                    var str = $("<tr></tr>");
-
-                    // Level
-                    $("<td width='5%'>" + mark + x + "</td>").appendTo(str);
-
-                    // Title
-                    $("<td width='45%'>" +
-                        "<a href='http://www.dream-pro.info/~lavalse/LR2IR/search.cgi?mode=ranking&bmsmd5=" + info[
-                            i]
-                        .md5 + "' target='_blank'>" + info[i].title + "</a></td>").appendTo(str);
-
-                    // Artist
-                    $("<td width='40%'>" + info[i].artist + "</td>").appendTo(str);
-
-                    // Comment
-                    $("<td width='10%'>" + info[i].comment + "</td>").appendTo(str);
-                    str.appendTo(obj);
-                    count++;
-
-                }
-                $("</tbody>").appendTo(obj);
-
-                if (obj_sep != null) {
-                    obj_sep.html("<td class='table-dark' style='text-align:center' colspan='4'>" + "<b>" + mark + x +
-                        " (" + count + "譜面)</b></td>");
-                }
-            }
+                    out.textContent = location.origin + "/t/" + m[1] + "/";
+                    open.href = "/t/" + m[1] + "/";
+                    open.classList.remove("disabled");
+                });
+            })();
         </script>
     </div>
+</body>
 
 </html>
