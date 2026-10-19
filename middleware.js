@@ -161,6 +161,20 @@ function toLevelOrder(cell) {
   return out.length ? out : null;
 }
 
+/**
+ * 曲名の比較。表ページ側の compareTitle と同じ基準にしてある。
+ *
+ * Edge ランタイムの ICU が日本語データを持っていない場合でも落ちないよう、
+ * Collator が作れなければコードポイント比較に落とす。
+ */
+const collator = (() => {
+  try { return new Intl.Collator("ja", { numeric: true, sensitivity: "variant" }); }
+  catch { return null; }
+})();
+
+const compareTitle = (x, y) =>
+  collator ? collator.compare(x ?? "", y ?? "") : (x < y ? -1 : x > y ? 1 : 0);
+
 /** セルを JSON 値に寄せる。"[1,2]" → 配列, "12" → 数値。 */
 function coerce(s) {
   if (/^[[{]/.test(s)) { try { return JSON.parse(s); } catch { /* 文字列として扱う */ } }
@@ -214,6 +228,13 @@ function buildTable(sheet, { headerRows, headerSheet, singleTable }) {
   const order = toLevelOrder(row.level_order) ?? [...levels].sort((a, b) => a - b || a.localeCompare(b));
   header.level_order = [...order, ...levels.filter((l) => !order.includes(l))];
   header.data_url = "data.json"; // header.json と同じ階層。相対で解決される（制約 5）
+
+  // level_order の順 → 曲名順に並べ替える。
+  // スプレッドシートの行順には頼らない（Google の並べ替えは漢字をコードポイント順にするため、
+  // 一般的な日本語の順序と食い違う）。表ページと beatoraja のフォルダ内の順序が揃う。
+  const rank = new Map(header.level_order.map((l, i) => [l, i]));
+  data.sort((a, b) =>
+    (rank.get(a.level) - rank.get(b.level)) || compareTitle(a.title, b.title));
 
   return { header, data };
 }
