@@ -425,8 +425,9 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
                         // .text() で入れることで、曲名に < や & が入っていても壊れない
                         var td = $("<td width='45%'></td>");
                         if (e.md5) {
+                            // Stellaverse IR の譜面ページ。LR2IR は現在アクセスできない。
                             $("<a target='_blank' rel='noopener'></a>")
-                                .attr("href", "http://www.dream-pro.info/~lavalse/LR2IR/search.cgi?mode=ranking&bmsmd5=" + e.md5)
+                                .attr("href", "https://ir.stellabms.xyz/charts/" + encodeURIComponent(e.md5))
                                 .text(e.title).appendTo(td);
                         } else {
                             td.text(e.title);
