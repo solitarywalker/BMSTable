@@ -62,6 +62,11 @@ https://bmstable.vercel.app/t/<スプレッドシートID>/<表の名前>/header
 `url` / `url_diff` はスプレッドシート由来の任意の文字列なので、`http://` と `https://` で
 始まるものだけをリンクにします（`javascript:` などを踏ませないため）。
 
+この 2 列は **beatoraja 側でも使われます**。`url` が `BMSTableElement.getURL()`、
+`url_diff` が `DifficultyTableElement.getAppendURL()` として読まれ、
+`SongData` の `url` / `appendurl` に入ります。表ページのリンク先を
+`url` = 本体、`url_diff` = 差分としているのはこれに合わせたものです。
+
 ### ヘッダシート（任意）
 
 `name` / `symbol` / `level_order` / `description` のいずれかの列を持つシート。1 行目が列名、**2 行目以降が 1 行 1 表**。
@@ -127,6 +132,28 @@ middleware はリクエストされたパスをそのまま受け取るので、
 
 関数を `api/` に置く構成（`api/table.js` + `vercel.json` の rewrite）でも同じことができますが、
 ファイルが 1 つ増えるので middleware にしています。
+
+### 表ページの埋め込みスクリプトを編集するとき
+
+`tablePage` が返す HTML の `<script>` は、`middleware.js` の**テンプレートリテラル
+（バックティック）の中**にあります。ここに正規表現リテラルを書くと黙って壊れます。
+
+```js
+// middleware.js にこう書くと
+return /^https?:\/\//i.test(s) ? s : null;
+
+// ブラウザに届く JS はこうなる（\/ が / に解釈される）
+return /^https?://i.test(s) ? s : null;
+```
+
+`//` 以降が行コメントになるため、残るのは `return /^https?:/` ＝ 正規表現リテラルで、
+**常に truthy** になります。条件判定が無効化されても構文としては正しいので
+`node --check` では捕まりません。実際に `safeUrl` でこれを踏み、`javascript:` が
+素通りしていました。
+
+`\\/` とエスケープすれば書けますが読みにくいので、`indexOf` などで済ませる方が安全です。
+`${` も同じ理由でそのままは書けません。既存の埋め込みスクリプトは `var` と `function`
+で書かれているので、合わせてください。
 
 ## ローカルで確認する
 
