@@ -51,6 +51,17 @@ https://bmstable.vercel.app/t/<スプレッドシートID>/<表の名前>/header
 - `artist` `comment` など**他の列はそのまま `data.json` に通る**
 - **このシートのタブ名が URL の `<表の名前>` になる。** 対応するヘッダ行が無ければ表の名前にもなる
 
+表ページでは次の列がリンクになります。値が空の行は素のテキストで表示します。
+
+| 列 | リンク先 | 由来 |
+|---|---|---|
+| Level | `url_diff` | 差分の配布元 |
+| Title | Stellaverse IR の譜面ページ | `md5` から生成 |
+| Artist | `url` | 本体の配布元 |
+
+`url` / `url_diff` はスプレッドシート由来の任意の文字列なので、`http://` と `https://` で
+始まるものだけをリンクにします（`javascript:` などを踏ませないため）。
+
 ### ヘッダシート（任意）
 
 `name` / `symbol` / `level_order` / `description` のいずれかの列を持つシート。1 行目が列名、**2 行目以降が 1 行 1 表**。

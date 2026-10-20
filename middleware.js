@@ -412,6 +412,36 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
                 return x < y ? -1 : x > y ? 1 : 0;
             }
 
+            // href に入れてよい URL だけを通す。
+            // url / url_diff はスプレッドシート由来の任意の文字列なので、そのまま
+            // href に入れると "javascript:..." を踏ませられる。表の持ち主以外が
+            // 編集できるシートもあるため、http(s) 以外は弾いてリンクにしない。
+            //
+            // 正規表現を使っていないのは、このスクリプトがテンプレートリテラルの
+            // 中にあるため。/^https?:\/\//i と書くと \/ が / に解釈されて
+            // /^https?://i … が出力され、// 以降が行コメントになる。結果
+            // return /^https?:/ だけが残り、常に truthy を返して検査が無効になる。
+            function safeUrl(u) {
+                if (!u) return null;
+                var s = String(u).trim();
+                var l = s.toLowerCase();
+                return (l.indexOf("http://") === 0 || l.indexOf("https://") === 0) ? s : null;
+            }
+
+            // セルを1つ作る。href が有効ならリンクにし、そうでなければ素のテキスト。
+            // 中身は必ず .text() で入れる（曲名に < や & が入っていても壊れない）。
+            function cell(width, text, href) {
+                var td = $("<td></td>").attr("width", width);
+                var url = safeUrl(href);
+                if (url) {
+                    $("<a target='_blank' rel='noopener'></a>")
+                        .attr("href", url).text(text).appendTo(td);
+                } else {
+                    td.text(text);
+                }
+                return td;
+            }
+
             function makeBMSTable(info, mark, order) {
                 var obj = $("#table_int");
                 obj.html("");
@@ -435,22 +465,17 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
 
                     rows.forEach(function (e) {
                         var tr = $("<tr></tr>");
-                        $("<td width='5%'></td>").text(mark + level).appendTo(tr);
 
-                        // .text() で入れることで、曲名に < や & が入っていても壊れない
-                        var td = $("<td width='45%'></td>");
-                        if (e.md5) {
-                            // Stellaverse IR の譜面ページ。LR2IR は現在アクセスできない。
-                            $("<a target='_blank' rel='noopener'></a>")
-                                .attr("href", "https://ir.stellabms.xyz/charts/" + encodeURIComponent(e.md5))
-                                .text(e.title).appendTo(td);
-                        } else {
-                            td.text(e.title);
-                        }
-                        td.appendTo(tr);
-
-                        $("<td width='40%'></td>").text(e.artist || "").appendTo(tr);
-                        $("<td width='10%'></td>").text(e.comment || "").appendTo(tr);
+                        // Level → url_diff（差分の配布元）
+                        // Title → Stellaverse IR の譜面ページ（LR2IR は現在アクセスできない）
+                        // Artist → url（本体の配布元）
+                        // url / url_diff が空の行はリンクにせず素のテキストで出す。
+                        cell("5%", mark + level, e.url_diff).appendTo(tr);
+                        cell("45%", e.title,
+                            e.md5 ? "https://ir.stellabms.xyz/charts/" + encodeURIComponent(e.md5) : null)
+                            .appendTo(tr);
+                        cell("40%", e.artist || "", e.url).appendTo(tr);
+                        cell("10%", e.comment || "", null).appendTo(tr);
                         tr.appendTo(obj);
                     });
                 });
