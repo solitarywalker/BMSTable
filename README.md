@@ -97,8 +97,13 @@ JavaScript も実行しません（HTML を行単位で読んで `<meta name="bm
 middleware.js   全部（ルーティング・シート取得・変換・一覧ページ・表ページ）
 index.html      案内ページ（Vercel が静的配信する）
 vercel.json     master 以外のブランチで自動デプロイを行わない設定
-dev.mjs         ローカル確認用のサーバ（本番では使わない）
+.vercelignore   配信に不要なファイルをデプロイから除外する
+dev.mjs         ローカル確認用のサーバ（デプロイされない）
 ```
+
+デプロイ後に公開されるのは `/`（`index.html`）と `/t/*`（middleware の応答）だけです。
+`middleware.js` と `vercel.json` は Vercel が設定・実行対象として扱うため静的配信されず、
+`dev.mjs` / `README.md` / `LICENSE` は `.vercelignore` で除外しています。
 
 ルート直下の `middleware.js` は Vercel が Edge Middleware として扱います。
 `export const config = { matcher: "/t/:path*" }` に一致したリクエストだけこのファイルが処理し、
@@ -158,5 +163,5 @@ CommonJS として解釈し、`import ... from "./middleware.js"` と書くと `
 また、本番と同じく `/t/*` だけを middleware に渡し、残りは静的配信に落としています
 （`config.matcher` の再現）。ここを揃えないとルーティングの挙動がずれます。
 
-`dev.mjs` は本番にもデプロイされ `/dev.mjs` として静的配信されます（秘密情報は含みません）。
-隠す場合は `.vercelignore` に追加してください。
+`dev.mjs` は `.vercelignore` に入れてあるのでデプロイには含まれません（`/dev.mjs` は 404）。
+ローカル専用のファイルです。
