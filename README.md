@@ -16,12 +16,12 @@ https://bmstable.vercel.app/t/<スプレッドシートID>/<表の名前>/header
 | `/t/<ID>/<表の名前>/` | その難易度表のページ |
 | `/t/<ID>/<表の名前>/header.json` | beatoraja に登録する URL |
 | `/t/<ID>/<表の名前>/data.json` | 譜面データ（`header.json` から相対参照） |
+| `/` | スプレッドシートの URL から一覧ページへ飛ぶページ |
 
 `data.json` は **`level_order` の順 → 曲名順**に並べ替えて返します。
 スプレッドシートの行順には依存しないので、シートを並べ替えたり行を追記しても順序は安定します。
 曲名の比較は `Intl.Collator("ja", { numeric: true })` です
 （漢字は ICU 日本語照合の順。読み順にするにはシートに読みの列が必要です）。
-| `/` | スプレッドシートの URL から一覧ページへ飛ぶページ |
 
 `<表の名前>` はデータシートのタブ名です（URL エンコードされます）。
 タブ名に `/` が含まれて指定できない場合は、代わりに **gid** を使えます。
@@ -96,6 +96,8 @@ JavaScript も実行しません（HTML を行単位で読んで `<meta name="bm
 ```
 middleware.js   全部（ルーティング・シート取得・変換・一覧ページ・表ページ）
 index.html      案内ページ（Vercel が静的配信する）
+vercel.json     master 以外のブランチで自動デプロイを行わない設定
+dev.mjs         ローカル確認用のサーバ（本番では使わない）
 ```
 
 ルート直下の `middleware.js` は Vercel が Edge Middleware として扱います。
@@ -108,3 +110,53 @@ middleware はリクエストされたパスをそのまま受け取るので、
 
 関数を `api/` に置く構成（`api/table.js` + `vercel.json` の rewrite）でも同じことができますが、
 ファイルが 1 つ増えるので middleware にしています。
+
+## ローカルで確認する
+
+Node 18 以降が必要です（`Request` / `Response` / `fetch` がグローバルにあればよい）。
+
+```
+node dev.mjs          # → http://localhost:3000/
+PORT=8080 node dev.mjs
+```
+
+本物の Google スプレッドシートを読むので、`index.html` に URL を貼るところから
+表ページの表示まで通しで確認できます。**`middleware.js` を編集したらブラウザの
+再読み込みだけでよく、サーバの再起動は要りません**（リクエストごとに読み直します）。
+
+### `index.html` を `file://` で直接開いても動きません
+
+ブラウザでファイルを開くだけでは、**変換を行うサーバが存在しない**ため動きません。
+`index.html` は URL を組み立てるだけの入力フォームで、実体は `middleware.js` です。
+`location.origin` も `file://` では使えないので、表示される URL も壊れます。
+
+変換処理をクライアント側に移しても解決しません。理由は 2 つあり、どちらも回避不能です。
+
+| 壁 | 内容 |
+|---|---|
+| CORS | `/htmlview` に CORS ヘッダが無い。`/export?format=csv` は最終応答には `Access-Control-Allow-Origin: *` が付くが、**最初の 307 リダイレクトには無い**。CORS はリダイレクト連鎖の各応答が検査を通る必要があるため失敗する（`file://` の opaque origin ならなおさら） |
+| ESM | `file://` のスクリプトは opaque origin 扱いになり、ES モジュールとして読み込めない（Chrome / Firefox とも）。`middleware.js` を `import` できない |
+
+静的ファイルサーバ（`python3 -m http.server` など）でも不十分です。`index.html` は
+表示できますが、`/t/...` は middleware が実行されないので 404 になります。
+
+### 本番と違う点
+
+Vercel の Edge Middleware は Node ではなく V8 isolate で動きます。Node API が無く、
+**ICU のデータも異なります**。`middleware.js` が `Intl.Collator` の生成失敗を拾って
+コードポイント比較に落としているのはそのためで、`dev.mjs` で見える日本語の並び順は
+本番と一致する保証がありません。**曲名順だけは本番でも目視してください。**
+
+### `dev.mjs` の実装メモ
+
+`dev.mjs` は `middleware.js` をソースとして読み、`data:` URL 経由で動的 `import` します。
+`export` を持つ ES モジュールなのに `package.json` が無いため、Node は拡張子 `.js` を
+CommonJS として解釈し、`import ... from "./middleware.js"` と書くと `export` が構文エラーに
+なるからです。`package.json` を足せば解決しますが、Vercel 側のビルド設定の自動検出に
+影響しかねないので避けています。
+
+また、本番と同じく `/t/*` だけを middleware に渡し、残りは静的配信に落としています
+（`config.matcher` の再現）。ここを揃えないとルーティングの挙動がずれます。
+
+`dev.mjs` は本番にもデプロイされ `/dev.mjs` として静的配信されます（秘密情報は含みません）。
+隠す場合は `.vercelignore` に追加してください。
