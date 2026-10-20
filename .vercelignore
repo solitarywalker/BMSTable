@@ -1,0 +1,19 @@
+# Vercel にアップロードしないファイル。本番は index.html と middleware.js だけで
+# 成立するので、それ以外を落として配信面を最小にする。
+#
+# 何を書くべきかは、実際の本番の配信状況を見て決めた (2026-10-20):
+#   /dev.mjs       200 → 配信されていたので止める
+#   /LICENSE       200 → 配信されていたので止める
+#   /README.md     404 → もともと配信されない。将来の既定変更に備えて保険で書く
+#   /middleware.js 404 → Edge Middleware として扱われるため静的配信されない
+#   /vercel.json   404 → 設定ファイルなので静的配信されない
+#
+# vercel.json は意図的に書いていない。既に配信されておらず除外の利益が無い一方、
+# ブランチ自動デプロイの抑止 (git.deploymentEnabled) の設定そのものなので、
+# デプロイから外すと抑止が効かなくなって preview 環境が復活しうる。
+# Vercel 公式の allowlist 例でも !vercel.json として除外対象から外してある。
+#
+# middleware.js も書いていない。これを落とすと /t/* が丸ごと動かなくなる。
+dev.mjs
+README.md
+LICENSE
