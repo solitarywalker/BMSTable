@@ -75,6 +75,7 @@ https://bmstable.vercel.app/t/<スプレッドシートID>/<表の名前>/header
 | 制約 | 根拠 | 対処 |
 |---|---|---|
 | 登録 URL は文字列として `.json` で終わる必要がある | `if (url.endsWith(".json"))` で header 直読みか HTML 解析かを分岐 | ID と表名を**クエリではなくパス**に入れている |
+| `name` と `symbol` は必須で、かつ String でなければならない | `!(result.get("symbol") instanceof String)` で `IOException("ヘッダ部の情報が不足しています")`。譜面データに到達する前に失敗し、ログは「読み込み失敗」だけ。JSON の数値も弾かれる | `symbol` が空でもキーを省略せず `""` を出す。数値になった値は文字列に戻す |
 | `level_order` は JSON 配列でなければならない | `(List) values.get("level_order")` と無条件キャスト。文字列だと `ClassCastException` で表ごと失敗（ログは「読み込み失敗」だけ） | `"1,2,3"` でも配列に正規化 |
 | `level_order` に無い `level` の譜面は消える | フォルダは `level_order` から作られ、`level` の文字列 `equals` で振り分け | 未知の `level` を `level_order` の末尾に追加 |
 | `level` に `symbol` を含めると二重になる | 表示時に `symbol` が前置される | 先頭が `symbol` と一致したら外す |

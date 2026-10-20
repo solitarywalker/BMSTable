@@ -36,6 +36,17 @@
 //
 // 6. Content-Type は見ていない。JavaScript も実行しない
 //    （HTML を行単位で読んで <meta name="bmstable"> を探すだけ）
+//
+// 7. name と symbol は必須で、しかも String でなければならない
+//      if (!(result.get("name") instanceof String)
+//          || !(result.get("symbol") instanceof String))
+//          throw new IOException("ヘッダ部の情報が不足しています");
+//    → symbol が空でもキーを省略できない。省略すると譜面データに到達する前に
+//      失敗し、ログは「難易度表 - <url> の読み込み失敗。」だけで原因が出ない。
+//      JSON の数値も String ではないので弾かれる（level_order が "[1,2]" の表で
+//      symbol や name に "0" や "12" が入っていると踏む）。
+//      空文字は通る。tag が無ければ symbol が代用され（BMSTable.getTag）、
+//      フォルダ名は "" + level = level になって name.length() > 0 を満たす。
 
 // ルート直下の middleware.js は Vercel が Edge Middleware として扱う。
 // matcher に一致したリクエストだけこのファイルが処理し、それ以外（/ の index.html など）は
@@ -196,8 +207,12 @@ function buildTable(sheet, { headerRows, headerSheet, singleTable }) {
   for (const k of headerSheet?.keys ?? []) {
     if (k !== "level_order" && row[k]) header[k] = coerce(row[k]);
   }
-  header.name ||= sheet.name; // name 列が無ければタブ名を表の名前にする
-  const symbol = typeof header.symbol === "string" ? header.symbol : "";
+  // name と symbol は必須かつ String でなければならない（制約 7）。
+  // セルが空でも symbol のキーを落とせないので、ここで必ず文字列として埋める。
+  // coerce が "12" を数値にしてしまうため、数値になったものも文字列へ戻す。
+  header.name = String(header.name ?? "") || sheet.name; // 空ならタブ名を表の名前にする
+  header.symbol = header.symbol == null ? "" : String(header.symbol);
+  const symbol = header.symbol;
 
   const levels = [];
   const data = [];
