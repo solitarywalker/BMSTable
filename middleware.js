@@ -252,6 +252,7 @@ async function loadTable(id, list, key, deadline) {
 
   // 最初の 1 枚だけは単独で読む。ヘッダシートが先頭のタブになっている表が
   // ほとんどなので、それだけで当たれば CSV は 2 本（対象 + ヘッダ）で済む。
+  // 後ろにあるほど本数が増える（1 → 5 → 9 → …）。README で先頭に置くよう案内している。
   for (let i = 0, step = 1; i < rest.length && !headerSheet && Date.now() < deadline;
     i += step, step = CONCURRENCY) {
     let batch;
