@@ -57,6 +57,19 @@ const CACHE = "public, max-age=600";
 const BASE = (id) => `https://docs.google.com/spreadsheets/d/${id}`;
 const HEADER_KEYS = ["name", "symbol", "level_order", "description", "tag", "mode"];
 
+// Google へ同時に投げる本数。シート 1 枚が CSV 1 本なので、シートの枚数がそのまま
+// 同時接続数になる。40 枚を超えるスプレッドシートを全部同時に取ると Google が 429 を
+// 返す（Vercel の出口 IP は共有なので、自分の端末から叩くより早く制限に当たる）。
+const CONCURRENCY = 4;
+
+// 再試行するステータス。429 と 5xx は時間をおけば通ることがある。
+const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+// Google の取得に使える合計時間。再試行の待ちと、新しい取得を始めるかの判断に使う。
+// Edge Middleware の実行時間上限は 25 秒なので、超えて 500 になるより
+// 読めたシートだけで一覧を返すほうがよい。
+const FETCH_BUDGET_MS = 15000;
+
 // ---------------------------------------------------------------- CSV
 
 /** RFC4180 準拠の最小パーサ。引用符内の改行・カンマ・"" を扱う（description に改行が入る）。 */
@@ -97,52 +110,188 @@ function toRecords(csv) {
 
 // ---------------------------------------------------------------- Sheets
 
-async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} — 共有設定が「リンクを知っている全員が閲覧可」か確認してください`);
-  return res.text();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** ステータスから利用者向けの説明を作る。429 を共有設定の問題と誤解させないため。 */
+function describeStatus(status) {
+  if (status === 429) {
+    return "Google のレート制限（429）に当たりました。少し待ってから再読み込みしてください";
+  }
+  if ([401, 403, 404].includes(status)) {
+    return "共有設定が「リンクを知っている全員が閲覧可」か確認してください";
+  }
+  return "Google スプレッドシートからの応答が異常です";
 }
 
 /**
- * スプレッドシートを丸ごと読む。シート名も gid も決め打ちしない。
- * /htmlview に items.push({name:"…", …, gid:"…"}) が埋まっているので、そこから gid を得る。
+ * Google から 1 本取得する。429 / 5xx は指数バックオフで数回だけ粘る。
+ * Retry-After が付いていればそれに従う。
  *
- * 返り値:
- *   sheets     全シート [{name, gid, keys, records}]
- *   dataSheets md5/sha256 列を持つシート = 難易度表
- *   headerRows ヘッダシートの各行。name 列でデータシートに対応づける
+ * deadline は呼び出し側で共有する。シートが多い表では再試行が何本も重なるので、
+ * 1 本ずつに時間を与えると Edge Middleware の実行時間上限に届いてしまう。
  */
-async function loadWorkbook(id) {
-  const html = await fetchText(`${BASE(id)}/htmlview`);
+async function fetchText(url, deadline = Date.now() + FETCH_BUDGET_MS) {
+  let wait = 500;
+
+  for (;;) {
+    const res = await fetch(url);
+    if (res.ok) return res.text();
+
+    // 読まない本文は明示的に捨てる（Edge ランタイムでは放置するとリークになる）
+    res.body?.cancel().catch(() => { /* すでに閉じている場合は何もしない */ });
+
+    const after = Number(res.headers.get("retry-after"));
+    const delay = Number.isFinite(after) && after > 0 ? after * 1000 : wait;
+
+    if (!RETRY_STATUS.has(res.status) || Date.now() + delay > deadline) {
+      throw new Error(`HTTP ${res.status} — ${describeStatus(res.status)}`);
+    }
+    // ジッタを足して、同時に走っている取得が同じ瞬間に再試行しないようにする
+    await sleep(delay + Math.random() * 250);
+    wait = Math.min(wait * 2, 4000);
+  }
+}
+
+/** items を最大 limit 本の並列で map する。入力と同じ順序で返す。 */
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i], i);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// ---------------------------------------------------------------- シートの読み込み
+
+/**
+ * シート一覧（{name, gid} の配列）を得る。シート名も gid も決め打ちしない。
+ * /htmlview に items.push({name:"…", …, gid:"…"}) が埋まっているので、そこから取る。
+ * CSV は読まないので、スプレッドシートの枚数に関係なくリクエストは 1 本。
+ */
+async function loadSheetList(id, deadline) {
+  const html = await fetchText(`${BASE(id)}/htmlview`, deadline);
   const found = [...html.matchAll(/items\.push\(\{name:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?gid:\s*"(\d+)"/g)];
   if (!found.length) throw new Error("シート一覧を取得できませんでした");
 
-  const sheets = await Promise.all(found.map(async ([, name, gid]) => ({
-    name: JSON.parse(`"${name}"`),
-    gid,
-    ...toRecords(await fetchText(`${BASE(id)}/export?format=csv&gid=${gid}`)),
-  })));
+  return found.map(([, name, gid]) => ({ name: JSON.parse(`"${name}"`), gid }));
+}
 
-  const dataSheets = sheets.filter((s) => s.records.length && (s.keys.includes("md5") || s.keys.includes("sha256")));
-  const headerSheet = sheets.find((s) => !dataSheets.includes(s) && s.records.length &&
-    HEADER_KEYS.some((k) => s.keys.includes(k)));
+/** シート 1 枚の CSV を読んで {name, gid, keys, records} にする。 */
+async function loadSheet(id, meta, deadline) {
+  const csv = await fetchText(`${BASE(id)}/export?format=csv&gid=${meta.gid}`, deadline);
+  return { ...meta, ...toRecords(csv) };
+}
+
+const isDataSheet = (s) =>
+  s.records.length > 0 && (s.keys.includes("md5") || s.keys.includes("sha256"));
+
+const isHeaderSheet = (s) =>
+  !isDataSheet(s) && s.records.length > 0 && HEADER_KEYS.some((k) => s.keys.includes(k));
+
+/**
+ * スプレッドシートを丸ごと読む。一覧ページ専用。
+ *
+ * 枚数ぶんの CSV を取るので、CONCURRENCY 本までに絞って投げる。
+ * 1 枚読めなかっただけで一覧全体を 502 にしないよう、失敗したシートと
+ * 時間切れで読まなかったシートは空（keys/records なし・failed）として扱い、
+ * 一覧には「不明」で出す。表そのものは個別のページから読めるので実害はない。
+ *
+ * 返り値:
+ *   sheets     全シート [{name, gid, keys, records, failed?}]
+ *   dataSheets md5/sha256 列を持つシート = 難易度表
+ *   headerRows ヘッダシートの各行。name 列でデータシートに対応づける
+ */
+async function loadWorkbook(id, list, deadline) {
+  const sheets = await mapPool(list, CONCURRENCY, async (meta) => {
+    try {
+      if (Date.now() >= deadline) throw new Error("時間切れ");
+      return await loadSheet(id, meta, deadline);
+    } catch {
+      return { ...meta, keys: [], records: [], failed: true };
+    }
+  });
+
+  const dataSheets = sheets.filter(isDataSheet);
+  const headerSheet = sheets.find(isHeaderSheet);
 
   return { sheets, dataSheets, headerSheet, headerRows: headerSheet?.records ?? [] };
 }
 
 /**
- * URL の 1 セグメントからデータシートを引く。
+ * 難易度表 1 つ分だけを読む。表ページ・header.json・data.json 用。
+ *
+ * ここで必要なのは対象のデータシートとヘッダシートの 2 枚だけである。全部読むと
+ * シートが 40 枚あるスプレッドシートでは CSV が 40 本になって 429 を踏むので、
+ * まず名前（または gid）で対象を引き、そのあとヘッダシートを探して見つかり次第打ち切る。
+ * ヘッダシートが先頭にある表が多いので、実際のリクエストは数本で済む。
+ *
+ * 失敗時は {error} を返す。
+ */
+async function loadTable(id, list, key, deadline) {
+  const meta = findSheet(list, key);
+  if (!meta) {
+    let shown = key;
+    try { shown = decodeURIComponent(key); } catch { /* 不正なエスケープはそのまま出す */ }
+    return { error: `「${shown}」というシートはありません。\nシート一覧: ${list.map((s) => s.name).join(" / ")}` };
+  }
+
+  const sheet = await loadSheet(id, meta, deadline);
+  if (!isDataSheet(sheet)) {
+    return { error: `「${sheet.name}」は難易度表ではありません（md5 / sha256 の列がありません）。` };
+  }
+
+  // ヘッダシートが無い表もある（header.json は name と symbol だけで成立する）。
+  // 探している途中で失敗・時間切れになっても、そこで打ち切って表自体は返す。
+  const rest = list.filter((m) => m.gid !== meta.gid);
+  let headerSheet = null;
+  let dataSheets = 1;  // 対象のシート
+  let unread = rest.length;
+
+  // 最初の 1 枚だけは単独で読む。ヘッダシートが先頭のタブになっている表が
+  // ほとんどなので、それだけで当たれば CSV は 2 本（対象 + ヘッダ）で済む。
+  for (let i = 0, step = 1; i < rest.length && !headerSheet && Date.now() < deadline;
+    i += step, step = CONCURRENCY) {
+    let batch;
+    try {
+      batch = await mapPool(rest.slice(i, i + step), CONCURRENCY, (m) => loadSheet(id, m, deadline));
+    } catch {
+      break;
+    }
+    unread -= batch.length;
+
+    for (const s of batch) {
+      if (isDataSheet(s)) dataSheets++;
+      else if (!headerSheet && isHeaderSheet(s)) headerSheet = s;
+    }
+  }
+
+  return {
+    sheet,
+    headerSheet,
+    headerRows: headerSheet?.records ?? [],
+    // buildTable の「name が一致しなくてもヘッダ行を使う」フォールバック用。
+    // 打ち切って読んでいないシートが残っていれば表の数が確定しないので false。
+    singleTable: dataSheets === 1 && unread === 0,
+  };
+}
+
+/**
+ * URL の 1 セグメントからシートを引く。{name, gid} を持つものなら何でも渡せる
+ * （CSV を読む前のシート一覧でも、読み終わったシートでも引ける）。
  * rewrite を経由すると percent-encoding が残る場合があるので、素・1回デコード・2回デコードを試し、
  * 最後に gid でも照合する（タブ名に / が入っていて名前では指せない場合の逃げ道）。
  */
-function findSheet(dataSheets, key) {
+function findSheet(sheets, key) {
   const cands = new Set([key]);
   for (let i = 0; i < 2; i++) {
     for (const c of [...cands]) {
       try { cands.add(decodeURIComponent(c)); } catch { /* 不正なエスケープは無視 */ }
     }
   }
-  return dataSheets.find((s) => cands.has(s.name)) ?? dataSheets.find((s) => s.gid === key) ?? null;
+  return sheets.find((s) => cands.has(s.name)) ?? sheets.find((s) => s.gid === key) ?? null;
 }
 
 // ---------------------------------------------------------------- 変換
@@ -305,6 +454,16 @@ function listPage(id, wb, origin) {
   const rows = wb.sheets.map((s) => {
     const isData = wb.dataSheets.includes(s);
     const seg = encodeURIComponent(s.name);
+
+    // 読めなかったシートは種別が判定できない。リンクだけは出して個別に開かせる
+    // （一覧は全シートを取るので、ここだけ 429 に当たることがある）。
+    if (s.failed) {
+      return `                    <tr>
+                        <td><a href="/t/${esc(id)}/${seg}/">${esc(s.name)}</a></td>
+                        <td class="text-muted">不明（読み込み失敗）</td>
+                        <td class="text-end">—</td><td>—</td>
+                    </tr>`;
+    }
 
     if (!isData) {
       const role = s === wb.headerSheet ? "ヘッダ" : "—";
@@ -507,30 +666,42 @@ export default async function middleware(request) {
   // 省略時（/t/<ID>/<表>/）はページを返す。
   if (file && !["header.json", "data.json", "index.html"].includes(file)) return fail("Not Found", 404);
 
-  let wb;
+  // 取得の時間予算はリクエスト全体で 1 つ。シートごとに与えると合計で上限を超える。
+  const deadline = Date.now() + FETCH_BUDGET_MS;
+
+  let list;
   try {
-    wb = await loadWorkbook(id);
+    list = await loadSheetList(id, deadline);
   } catch (e) {
     return fail(`スプレッドシートを読めませんでした: ${e.message}`, 502);
   }
 
-  // /t/<ID>/ → シート一覧
-  if (!table) return listPage(id, wb, url.origin);
-
-  const sheet = findSheet(wb.dataSheets, table);
-  if (!sheet) {
-    const names = wb.dataSheets.map((s) => s.name).join(" / ") || "（難易度表が1つもありません）";
-    return fail(`「${decodeURIComponent(table)}」という難易度表はありません。\n候補: ${names}`, 404);
+  // /t/<ID>/ → シート一覧。ここだけは全シートの CSV が必要になる
+  if (!table) {
+    try {
+      return listPage(id, await loadWorkbook(id, list, deadline), url.origin);
+    } catch (e) {
+      return fail(`スプレッドシートを読めませんでした: ${e.message}`, 502);
+    }
   }
+
+  // 表ページ・header.json・data.json は対象のシートとヘッダシートだけ読む
+  let t;
+  try {
+    t = await loadTable(id, list, table, deadline);
+  } catch (e) {
+    return fail(`難易度表を読めませんでした: ${e.message}`, 502);
+  }
+  if (t.error) return fail(t.error, 404);
 
   let built;
   try {
-    built = buildTable(sheet, { ...wb, singleTable: wb.dataSheets.length === 1 });
+    built = buildTable(t.sheet, t);
   } catch (e) {
     return fail(`難易度表を生成できませんでした: ${e.message}`, 502);
   }
 
   if (file === "header.json") return json(built.header);
   if (file === "data.json") return json(built.data);
-  return tablePage(id, sheet, built.header, url.origin);
+  return tablePage(id, t.sheet, built.header, url.origin);
 }
