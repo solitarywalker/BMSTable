@@ -243,39 +243,36 @@ async function loadTable(id, list, key, deadline) {
     return { error: `「${sheet.name}」は難易度表ではありません（md5 / sha256 の列がありません）。` };
   }
 
-  // ヘッダシートが無い表もある（header.json は name と symbol だけで成立する）。
-  // 探している途中で失敗・時間切れになっても、そこで打ち切って表自体は返す。
+  // ヘッダシートは「対象を除いた先頭のタブ」1 枚しか見ない。外れたら探さず打ち切る。
+  //
+  // 探し続けると、リクエスト数がスプレッドシートの構成次第で膨らむ。ヘッダシートが
+  // 後ろにあるほど増え（CSV 1 → 5 → 9 → …）、ヘッダシートを置いていない表では
+  // 見つかるまで打ち切れないので毎回全シートを読むことになる。1 枚に固定すれば
+  // どんな構成でも必ず 3 リクエスト（htmlview + 対象 + 1 枚）で終わる。
+  //
+  // 代わりにヘッダシートを先頭に置いていない表はヘッダを読めなくなる。黙って
+  // name / symbol / description / level_order が変わると気付けないので、
+  // headerMissing を返してページ側で知らせる（README「ヘッダシートの位置」）。
   const rest = list.filter((m) => m.gid !== meta.gid);
-  let headerSheet = null;
-  let dataSheets = 1;  // 対象のシート
-  let unread = rest.length;
+  let first = null;
 
-  // 最初の 1 枚だけは単独で読む。ヘッダシートが先頭のタブになっている表が
-  // ほとんどなので、それだけで当たれば CSV は 2 本（対象 + ヘッダ）で済む。
-  // 後ろにあるほど本数が増える（1 → 5 → 9 → …）。README で先頭に置くよう案内している。
-  for (let i = 0, step = 1; i < rest.length && !headerSheet && Date.now() < deadline;
-    i += step, step = CONCURRENCY) {
-    let batch;
+  if (rest.length) {
     try {
-      batch = await mapPool(rest.slice(i, i + step), CONCURRENCY, (m) => loadSheet(id, m, deadline));
-    } catch {
-      break;
-    }
-    unread -= batch.length;
-
-    for (const s of batch) {
-      if (isDataSheet(s)) dataSheets++;
-      else if (!headerSheet && isHeaderSheet(s)) headerSheet = s;
-    }
+      first = await loadSheet(id, rest[0], deadline);
+    } catch { /* 読めなければヘッダ無しで表を返す */ }
   }
+  const headerSheet = first && isHeaderSheet(first) ? first : null;
 
   return {
     sheet,
     headerSheet,
     headerRows: headerSheet?.records ?? [],
     // buildTable の「name が一致しなくてもヘッダ行を使う」フォールバック用。
-    // 打ち切って読んでいないシートが残っていれば表の数が確定しないので false。
-    singleTable: dataSheets === 1 && unread === 0,
+    // 先頭 1 枚しか読まないので、シートが 2 枚（ヘッダ + データ）のときだけ確定する。
+    singleTable: rest.length === 0 || (rest.length === 1 && first != null && !isDataSheet(first)),
+    // 他にシートがあるのにヘッダが取れていない。ヘッダシートを置いていない表でも
+    // 立つので、文言は「読んでいない」であって「無い」ではない。
+    headerMissing: rest.length > 0 && !headerSheet,
   };
 }
 
@@ -446,6 +443,9 @@ const BOOTSTRAP = `
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta1/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-giJF6kkoqNQ00vy+HMDP7azOuL0xtbfIcaT9wjKHr8RbDVddVHyTfAAsrekwKmP1" crossorigin="anonymous">`;
 
+// 警告から構成の直し方へ案内する先。見出しのアンカーは GitHub の採番に合わせてある。
+const README = "https://github.com/solitarywalker/BMSTable";
+
 const htmlResponse = (body) => new Response(body,
   { headers: { "content-type": "text/html; charset=utf-8", "cache-control": CACHE } });
 
@@ -486,11 +486,22 @@ function listPage(id, wb, origin) {
                     </tr>`;
   }).join("\n");
 
+  // 各表のページはヘッダシートを先頭のタブ 1 枚しか探さない（loadTable）。一覧は
+  // 全シートを読むのでヘッダシートが何枚目かを知っている。ここでしか気付けないので言う。
+  const headerAt = wb.headerSheet ? wb.sheets.indexOf(wb.headerSheet) : -1;
+  const misplaced = headerAt <= 0 ? "" : `
+        <div class="alert alert-warning" role="alert">
+            <p class="mb-0">ヘッダシート「${esc(wb.headerSheet.name)}」が${headerAt + 1}枚目のタブにあります。
+                各難易度表のページは<strong>先頭のタブ</strong>しか見ないので、このままでは
+                <code>name</code>・<code>symbol</code>・<code>description</code>・<code>level_order</code>
+                が反映されません。<a href="${README}#ヘッダシートの位置" target="_blank" rel="noopener">タブを先頭に移動</a>してください。</p>
+        </div>`;
+
   return htmlResponse(`${HEAD("シート一覧")}${BOOTSTRAP}
 </head>
 ${NAV("シート一覧", "/")}
 
-    <div class="container">
+    <div class="container">${misplaced}
         <p>このスプレッドシートに含まれるシートです。
             <code>md5</code> または <code>sha256</code> の列を持つシートが難易度表として読まれます。</p>
 
@@ -517,9 +528,20 @@ ${rows}
 
 // ---------------------------------------------------------------- 難易度表ページ
 
-function tablePage(id, sheet, header, origin) {
+function tablePage(id, sheet, header, origin, headerMissing) {
   const seg = encodeURIComponent(sheet.name);
   const headerUrl = `${origin}/t/${esc(id)}/${seg}/header.json`;
+
+  // ヘッダシートは先頭のタブ 1 枚しか見ない（loadTable）。外れると表の名前や
+  // symbol が黙って変わるので、ここで言う。ヘッダシートを置いていない表でも
+  // 出るため、最後の 1 文で「それなら正常」と断ってある。
+  const warning = !headerMissing ? "" : `
+        <div class="alert alert-warning mb-3" role="alert">
+            <p class="mb-0">ヘッダシートを読んでいません。表の名前・<code>symbol</code>・<code>description</code>・<code>level_order</code>
+                はこのシートの内容から決めた値です。ヘッダシートは<strong>先頭のタブ</strong>にある場合だけ読むので、
+                反映したい場合は<a href="${README}#ヘッダシートの位置" target="_blank" rel="noopener">タブを先頭に移動</a>してください。
+                ヘッダシートを置いていない場合はこの表示で正常です。</p>
+        </div>`;
 
   return htmlResponse(`${HEAD(header.name)}
     <!--
@@ -532,7 +554,7 @@ function tablePage(id, sheet, header, origin) {
 </head>
 ${NAV(header.name, `/t/${esc(id)}/`)}
 
-    <div class="container">
+    <div class="container">${warning}
         <div class="alert alert-success mb-3" role="alert">
             <p>${esc(header.description).replace(/\n/g, "<br>")}</p>
             <p class="mb-0">難易度表の読み込みと表示に数秒かかります。</p>
@@ -704,5 +726,5 @@ export default async function middleware(request) {
 
   if (file === "header.json") return json(built.header);
   if (file === "data.json") return json(built.data);
-  return tablePage(id, t.sheet, built.header, url.origin);
+  return tablePage(id, t.sheet, built.header, url.origin, t.headerMissing);
 }
