@@ -940,7 +940,7 @@ ${NAV("シート一覧", "/")}
     <div class="container">${misplaced}${mismatch}
         <p>このスプレッドシートに含まれるシートです。
             <code>md5</code> または <code>sha256</code> の列を持つシートが難易度表として読まれます。
-            <code>name</code> と <code>md5</code> を持ち <code>title</code>・<code>level</code> が無いシートは
+            ただし <code>name</code> 列もあるシートは
             <a href="${README}#段位認定course" target="_blank" rel="noopener">段位認定</a>として扱い、
             ヘッダシートの <code>course</code> 列から参照されたときだけ表に付きます。</p>
 
