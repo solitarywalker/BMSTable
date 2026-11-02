@@ -2,8 +2,8 @@
 // 1 つのスプレッドシートに複数の難易度表（データシート）を置ける。
 //
 //   /t/<ID>/                      スプレッドシート内のシート一覧
-//   /t/<ID>/<表の名前>/            その難易度表のページ
-//   /t/<ID>/<表の名前>/header.json beatoraja に登録する URL
+//   /t/<ID>/<表の名前>/            その難易度表のページ。beatoraja に登録する URL
+//   /t/<ID>/<表の名前>/header.json ページの meta name=bmstable が指すヘッダ
 //   /t/<ID>/<表の名前>/data.json   譜面データ（header.json から相対参照される）
 //
 // <表の名前> はデータシートのタブ名。gid でも指定できる（タブ名に / が入る場合の逃げ道）。
@@ -47,6 +47,13 @@
 //      symbol や name に "0" や "12" が入っていると踏む）。
 //      空文字は通る。tag が無ければ symbol が代用され（BMSTable.getTag）、
 //      フォルダ名は "" + level = level になって name.length() > 0 を満たす。
+//
+// 8. 0.8.9 では ".json" で終わる登録 URL が必ず失敗する（0.8.9 の jar で再現済み）
+//      decode() が headURL の経路でも getAbsoluteURL(sourceURL, headURL) を呼び、
+//      空の sourceURL から new URL("") を作って MalformedURLException: no protocol
+//    → beatoraja に案内する登録 URL は header.json ではなく表ページ（/t/<ID>/<表の名前>/）。
+//      表ページ経由なら 0.8.8 / 0.8.9 のどちらでも読める。header.json 自体は
+//      meta の参照先と、0.8.8 以前で直接登録された URL のために残す。
 
 // ルート直下の middleware.js は Vercel が Edge Middleware として扱う。
 // matcher に一致したリクエストだけこのファイルが処理し、それ以外（/ の index.html など）は
@@ -351,9 +358,9 @@ async function loadTable(id, list, key, deadline) {
  * 段位認定シート 1 枚を段位ページ用に読む。loadTable から呼ばれる。
  *
  * 段位は単独の難易度表にならないので、この URL には登録先の header.json が無い。
- * 代わりに「この段位を載せている難易度表」を探し、その表の header.json を
- * 登録 URL として案内する（meta name=bmstable もそれを指すので、こちらの URL を
- * beatoraja に登録しても難易度表ごと読まれる）。
+ * 代わりに「この段位を載せている難易度表」を探し、その表のページを
+ * 登録 URL として案内する（meta name=bmstable はその表の header.json を指すので、
+ * こちらの URL を beatoraja に登録しても難易度表ごと読まれる）。
  *
  * 載せている表はヘッダシートの course 列から引く。見つかったらその表のデータシートも
  * 読み、md5 → 曲名・レベルの対応を作って課題曲を曲名で出す。
@@ -867,7 +874,7 @@ function listPage(id, wb, origin) {
         return key === s.name || key === s.gid;
       });
       const url = owner
-        ? `${origin}/t/${esc(id)}/${encodeURIComponent(owner.name)}/header.json`
+        ? `${origin}/t/${esc(id)}/${encodeURIComponent(owner.name)}/`
         : "—";
 
       return `                    <tr>
@@ -894,7 +901,7 @@ function listPage(id, wb, origin) {
                         <td><a href="/t/${esc(id)}/${seg}/">${esc(s.name)}</a></td>
                         <td>難易度表</td>
                         <td class="text-end">${songs}</td>
-                        <td><code class="user-select-all">${origin}/t/${esc(id)}/${seg}/header.json</code></td>
+                        <td><code class="user-select-all">${origin}/t/${esc(id)}/${seg}/</code></td>
                     </tr>`;
   }).join("\n");
 
@@ -940,7 +947,7 @@ ${NAV("シート一覧", "/")}
         <div class="table-responsive">
             <table class="table table-light table-striped table-hover">
                 <thead class="table-dark">
-                    <tr><th>シート名</th><th>種別</th><th class="text-end">譜面数</th><th>header.json</th></tr>
+                    <tr><th>シート名</th><th>種別</th><th class="text-end">譜面数</th><th>beatoraja に登録する URL</th></tr>
                 </thead>
                 <tbody>
 ${rows}
@@ -968,18 +975,19 @@ const trophyText = (t) => `${t.name} ミス${t.missrate}% スコア${t.scorerate
 /**
  * 段位認定シートのページ。段位ごとに課題曲を並べる。
  *
- * 登録 URL はこの段位を載せている難易度表の header.json にする。段位シート自体には
+ * 登録 URL はこの段位を載せている難易度表のページにする。段位シート自体には
  * header.json が無く（難易度表ではないので data.json も作れない）、段位は表の
  * header.json の course に入って配信されるため、登録先は表と同じ URL でよい。
- * meta name=bmstable も同じものを指すので、この URL を beatoraja に登録しても通る。
+ * meta name=bmstable は表の header.json を指すので、この URL を beatoraja に登録しても通る。
  */
 function coursePage(id, origin, {
   courseSheet, owners, course: grouped, symbol, headerMissing, ownerUnmatched, sheetNames,
 }) {
   const course = grouped.flat();
   const tableUrl = owners.length
-    ? `${origin}/t/${esc(id)}/${encodeURIComponent(owners[0])}/header.json`
+    ? `${origin}/t/${esc(id)}/${encodeURIComponent(owners[0])}/`
     : null;
+  const headerUrl = tableUrl && `${tableUrl}header.json`;
 
   // 載せている表が分からない場合。原因は 3 つあって直し方が違うので言い分ける。
   // 段位だけ出しても beatoraja には登録できないので、必ず知らせる。
@@ -1026,10 +1034,10 @@ ${songs}`;
 
   return htmlResponse(`${HEAD(courseSheet.name)}
     <!--
-      登録 URL は難易度表と同じ header.json。段位シートに header.json は無い。
+      meta は難易度表の header.json を指す。段位シートに header.json は無い。
       beatoraja / LR2 はこの1行を行単位の文字列一致で探すので、属性の順序を変えないこと。
-    -->${tableUrl ? `
-    <meta name="bmstable" content="${tableUrl}" />` : ""}${BOOTSTRAP}
+    -->${headerUrl ? `
+    <meta name="bmstable" content="${headerUrl}" />` : ""}${BOOTSTRAP}
 </head>
 ${NAV(courseSheet.name, `/t/${esc(id)}/`)}
 
@@ -1073,7 +1081,8 @@ function tablePage(id, sheet, header, origin, {
   headerMissing, headerUnmatched, courseMissing, courseSheet,
 }) {
   const seg = encodeURIComponent(sheet.name);
-  const headerUrl = `${origin}/t/${esc(id)}/${seg}/header.json`;
+  const pageUrl = `${origin}/t/${esc(id)}/${seg}/`;
+  const headerUrl = `${pageUrl}header.json`;
 
   // ヘッダシートは先頭のタブ 1 枚しか見ない（loadTable）。外れると表の名前や
   // symbol が黙って変わるので、ここで言う。ヘッダシートを置いていない表でも
@@ -1127,7 +1136,7 @@ ${NAV(header.name, `/t/${esc(id)}/`)}
     : ""}
             <hr>
             <p class="mb-1">beatoraja に登録する URL:</p>
-            <p class="mb-0"><code class="user-select-all">${headerUrl}</code></p>
+            <p class="mb-0"><code class="user-select-all">${pageUrl}</code></p>
         </div>
 
         <!--ここから難易度表本体-->
@@ -1289,9 +1298,9 @@ export default async function middleware(request) {
   if (t.courseSheet && !t.sheet) {
     if (file === "header.json" || file === "data.json") {
       const to = t.owners.length
-        ? `${url.origin}/t/${id}/${encodeURIComponent(t.owners[0])}/${file}`
+        ? `${url.origin}/t/${id}/${encodeURIComponent(t.owners[0])}/`
         : "（ヘッダシートの course 列にこのシート名を書いてください）";
-      return fail(`「${t.courseSheet.name}」は段位認定のシートです。${file} はありません。\n段位は難易度表の header.json に入ります: ${to}`, 404);
+      return fail(`「${t.courseSheet.name}」は段位認定のシートです。${file} はありません。\n段位は難易度表の header.json に入ります。beatoraja にはその表のページを登録してください: ${to}`, 404);
     }
     return coursePage(id, url.origin, t);
   }
